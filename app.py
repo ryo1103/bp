@@ -334,6 +334,52 @@ def bp_analysis_tab(bundle: Dict[str, object]) -> None:
     )
 
 
+def risk_sort_value(task: Dict[str, object]) -> int:
+    return {"high": 0, "medium": 1, "low": 2}.get(str(task["risk_level"]), 3)
+
+
+def render_task_cards(tasks: List[Dict[str, object]], empty_text: str) -> None:
+    if not tasks:
+        st.info(empty_text)
+        return
+
+    for task in tasks:
+        with st.container(border=True):
+            cols = st.columns([3, 1, 1])
+            with cols[0]:
+                st.markdown(f"**{task['title']}**")
+                st.caption(f"已有证据：{task['existing_evidence']}")
+            with cols[1]:
+                st.write(f"风险：{RISK_LABELS.get(task['risk_level'], task['risk_level'])}")
+            with cols[2]:
+                st.write(f"状态：{STATUS_LABELS.get(task['status'], task['status'])}")
+
+            st.write(f"缺失证据：{task['missing_evidence']}")
+            st.write(f"建议材料：{task['suggested_materials']}")
+            st.write(f"建议访谈对象：{task['suggested_interviewees']}")
+            st.caption(f"问创始人：{task['founder_questions']}")
+            st.caption(f"问客户：{task['customer_questions']}")
+
+            with st.form(f"task_{task['id']}"):
+                status = st.selectbox(
+                    "状态",
+                    list(STATUS_LABELS),
+                    index=list(STATUS_LABELS).index(task["status"]),
+                    format_func=lambda value: STATUS_LABELS[value],
+                )
+                risk = st.selectbox(
+                    "风险",
+                    list(RISK_LABELS),
+                    index=list(RISK_LABELS).index(task["risk_level"]),
+                    format_func=lambda value: RISK_LABELS[value],
+                )
+                notes = st.text_input("备注", value=task["user_notes"])
+                if st.form_submit_button("保存任务状态"):
+                    update_task(task["id"], status, risk, notes)
+                    st.success("已更新")
+                    st.rerun()
+
+
 def tasks_tab(bundle: Dict[str, object]) -> None:
     st.subheader("验证任务")
     with st.expander("手动添加验证任务"):
@@ -393,41 +439,21 @@ def tasks_tab(bundle: Dict[str, object]) -> None:
     if not bundle["tasks"]:
         st.info("上传 BP 后，关键假设会自动转化为验证任务。")
         return
-    for task in bundle["tasks"]:
-        with st.container(border=True):
-            cols = st.columns([3, 1, 1])
-            with cols[0]:
-                st.markdown(f"**{task['title']}**")
-                st.caption(f"已有证据：{task['existing_evidence']}")
-            with cols[1]:
-                st.write(f"风险：{RISK_LABELS.get(task['risk_level'], task['risk_level'])}")
-            with cols[2]:
-                st.write(f"状态：{STATUS_LABELS.get(task['status'], task['status'])}")
 
-            st.write(f"缺失证据：{task['missing_evidence']}")
-            st.write(f"建议材料：{task['suggested_materials']}")
-            st.write(f"建议访谈对象：{task['suggested_interviewees']}")
-            st.caption(f"问创始人：{task['founder_questions']}")
-            st.caption(f"问客户：{task['customer_questions']}")
-
-            with st.form(f"task_{task['id']}"):
-                status = st.selectbox(
-                    "状态",
-                    list(STATUS_LABELS),
-                    index=list(STATUS_LABELS).index(task["status"]),
-                    format_func=lambda value: STATUS_LABELS[value],
-                )
-                risk = st.selectbox(
-                    "风险",
-                    list(RISK_LABELS),
-                    index=list(RISK_LABELS).index(task["risk_level"]),
-                    format_func=lambda value: RISK_LABELS[value],
-                )
-                notes = st.text_input("备注", value=task["user_notes"])
-                if st.form_submit_button("保存任务状态"):
-                    update_task(task["id"], status, risk, notes)
-                    st.success("已更新")
-                    st.rerun()
+    pending_tasks = sorted(
+        [task for task in bundle["tasks"] if task["status"] != "verified"],
+        key=lambda task: (risk_sort_value(task), task["updated_at"]),
+    )
+    verified_tasks = sorted(
+        [task for task in bundle["tasks"] if task["status"] == "verified"],
+        key=lambda task: task["updated_at"],
+        reverse=True,
+    )
+    pending_tab, verified_tab = st.tabs([f"待验证（{len(pending_tasks)}）", f"已验证（{len(verified_tasks)}）"])
+    with pending_tab:
+        render_task_cards(pending_tasks, "暂无待验证任务。")
+    with verified_tab:
+        render_task_cards(verified_tasks, "暂无已验证任务。")
 
 
 def supplementary_tab(project_id: str, bundle: Dict[str, object]) -> None:
