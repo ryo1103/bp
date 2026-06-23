@@ -8,8 +8,30 @@ from unittest.mock import patch
 from services.llm import LLMClient
 from services.models import LLMConfigError, LLMResponseError
 from services.parser import make_chunks
-from services.pipeline import analyze_bp, analyze_bp_batch, generate_memo_from_data, validate_bp_analysis, verify_supplementary
-from services.storage import DATA_DIR, UPLOAD_DIR, create_manual_task, create_project, get_project_bundle, init_db
+from services.pipeline import (
+    analyze_bp,
+    analyze_bp_batch,
+    analyze_interview_note,
+    analyze_strategy_match,
+    generate_material_request_draft,
+    generate_memo_from_data,
+    validate_bp_analysis,
+    verify_supplementary,
+)
+from services.storage import (
+    DATA_DIR,
+    UPLOAD_DIR,
+    create_fund_strategy,
+    create_manual_task,
+    create_project,
+    get_project_bundle,
+    init_db,
+    insert_interview_note,
+    list_deal_pipeline_projects,
+    review_ai_suggestion,
+    update_human_project_status,
+    update_material_request_status,
+)
 
 
 class FakeLLM:
@@ -270,17 +292,54 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(bundle["red_flags"][0]["status"], "open")
         self.assertEqual(len(bundle["funding_analyses"]), 1)
         self.assertIn("Pre-A", bundle["funding_analyses"][0]["inferred_round"])
+        self.assertEqual(len(bundle["evidence_items"]), 1)
+        self.assertEqual(len(bundle["risk_items"]), 1)
+        self.assertEqual(len(bundle["investment_hypotheses"]), 5)
+        self.assertEqual(len(bundle["research_actions"]), 5)
+        self.assertEqual(len(bundle["readiness_scorecards"]), 6)
+        self.assertEqual(len(bundle["material_requests"]), 5)
 
     def test_generate_memo_from_structured_data(self):
         project_id = create_project("启明智能", "AI 应用", "天使轮", "")
         analyze_bp(project_id, "bp.txt", b"", "公司已服务 37 家连锁药房客户。", FakeLLM())
         memo = generate_memo_from_data(project_id)
-        self.assertIn("最重要看点", memo)
-        self.assertIn("关键假设与验证任务", memo)
+        bundle = get_project_bundle(project_id)
+        self.assertIn("BP 中的积极信号", memo)
+        self.assertIn("关键假设与尽调动作", memo)
         self.assertIn("赛道归类与产业位置", memo)
-        self.assertIn("直接异常与红旗", memo)
+        self.assertIn("疑似异常与待核验风险", memo)
         self.assertIn("融资轮次与投资人信号", memo)
         self.assertIn("启明天使基金", memo)
+        self.assertGreaterEqual(len(bundle["memo_sections"]), 8)
+
+    def test_strategy_material_and_interview_p2_workflows(self):
+        project_id = create_project("启明智能", "AI 应用", "天使轮", "")
+        analyze_bp(project_id, "bp.txt", b"", "公司已服务 37 家连锁药房客户。", FakeLLM())
+        strategy_id = create_fund_strategy(
+            {
+                "strategy_name": "早期 AI 应用策略",
+                "focus_sectors": "AI 应用、医疗健康",
+                "preferred_stages": "天使轮、Pre-A",
+                "created_by": "tester",
+            }
+        )
+        match = analyze_strategy_match(project_id, strategy_id)
+        self.assertEqual(match["match_status"], "matched_by_current_materials")
+
+        drafts = generate_material_request_draft(project_id)
+        self.assertEqual(drafts, [])
+        bundle = get_project_bundle(project_id)
+        self.assertEqual(len(bundle["material_requests"]), 5)
+        request_id = bundle["material_requests"][0]["id"]
+        update_material_request_status(request_id, "requested", "已向公司发送资料清单")
+        bundle = get_project_bundle(project_id)
+        self.assertEqual(next(item for item in bundle["material_requests"] if item["id"] == request_id)["status"], "requested")
+
+        note_id = insert_interview_note(project_id, "founder", "创始人称 37 家客户中 20 家已完成续费。", "张三", "CEO", "启明智能", "2026-06-23", "tester")
+        analyze_interview_note(project_id, note_id)
+        bundle = get_project_bundle(project_id)
+        self.assertEqual(len(bundle["interview_notes"]), 1)
+        self.assertTrue(any(item["target_object_type"] == "interview_note" for item in bundle["ai_suggestions"]))
 
     def test_create_manual_task_persists_user_task(self):
         project_id = create_project("启明智能", "AI 应用", "天使轮", "")
@@ -303,6 +362,13 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(task["linked_claim_id"], "")
         self.assertEqual(task["linked_assumption_id"], "")
         self.assertEqual(task["status"], "unverified")
+
+    def test_human_status_update_is_visible_in_deal_pipeline(self):
+        project_id = create_project("启明智能", "AI 应用", "天使轮", "")
+        update_human_project_status(project_id, "light_dd", "进入轻尽调", "进入轻尽调", "tester")
+        projects = list_deal_pipeline_projects()
+        project = next(item for item in projects if item["id"] == project_id)
+        self.assertEqual(project["human_project_status"], "light_dd")
 
     def test_reanalysis_uses_existing_and_new_bp_materials_without_deleting_manual_tasks(self):
         project_id = create_project("启明智能", "AI 应用", "天使轮", "")
@@ -350,9 +416,31 @@ class PipelineTest(unittest.TestCase):
             FakeSupplementLLM(),
         )
         bundle = get_project_bundle(project_id)
+        self.assertTrue(all(task["status"] == "unverified" for task in bundle["tasks"]))
+        self.assertEqual(bundle["red_flags"][0]["status"], "open")
+        self.assertEqual(len(bundle["supplementary_resolutions"]), 2)
+        self.assertEqual(len(bundle["ai_suggestions"]), 2)
+        self.assertEqual(bundle["project"]["pending_ai_suggestion_count"], 2)
+
+    def test_accepting_ai_suggestions_applies_task_and_red_flag_updates(self):
+        project_id = create_project("启明智能", "AI 应用", "天使轮", "")
+        analyze_bp(project_id, "bp.txt", b"", "公司已服务 37 家连锁药房客户，收入达到 860 万元。", FakeLLM())
+        verify_supplementary(
+            project_id,
+            "contracts.txt",
+            b"",
+            "补充材料显示部分客户已付款，并提供合同编号。",
+            FakeSupplementLLM(),
+        )
+        bundle = get_project_bundle(project_id)
+        for suggestion in bundle["ai_suggestions"]:
+            review_ai_suggestion(suggestion["id"], "accept", reviewed_by="tester")
+        bundle = get_project_bundle(project_id)
         self.assertTrue(any(task["status"] == "partially_verified" for task in bundle["tasks"]))
         self.assertEqual(bundle["red_flags"][0]["status"], "partially_resolved")
-        self.assertEqual(len(bundle["supplementary_resolutions"]), 2)
+        self.assertTrue(any(action["action_status"] == "in_progress" for action in bundle["research_actions"]))
+        self.assertEqual(bundle["risk_items"][0]["risk_status"], "partially_resolved")
+        self.assertEqual(bundle["project"]["pending_ai_suggestion_count"], 0)
 
     def test_unrelated_supplementary_summarizes_material_value_without_status_updates(self):
         project_id = create_project("启明智能", "AI 应用", "天使轮", "")
@@ -362,6 +450,7 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(all(task["status"] == "unverified" for task in bundle["tasks"]))
         self.assertEqual(bundle["red_flags"][0]["status"], "open")
         self.assertEqual(bundle["supplementary_resolutions"][0]["resolution_status"], "new_information")
+        self.assertEqual(bundle["project"]["material_stage"], "bp_plus_basic_docs")
 
     def test_financial_csv_material_creates_financial_analysis(self):
         project_id = create_project("启明智能", "AI 应用", "天使轮", "")
@@ -376,6 +465,7 @@ class PipelineTest(unittest.TestCase):
         bundle = get_project_bundle(project_id)
         self.assertEqual(len(bundle["financial_analyses"]), 1)
         self.assertIn("回款", bundle["financial_analyses"][0]["cashflow_quality"])
+        self.assertEqual(bundle["project"]["material_stage"], "bp_plus_financials")
 
 
 if __name__ == "__main__":
