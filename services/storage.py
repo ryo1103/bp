@@ -179,6 +179,108 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS sector_analyses (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              primary_industry TEXT NOT NULL,
+              sub_sector TEXT NOT NULL,
+              target_customer TEXT NOT NULL,
+              value_chain_position TEXT NOT NULL,
+              replacement_target TEXT NOT NULL,
+              profit_pool_logic TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS industry_map_nodes (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              node_type TEXT NOT NULL,
+              label TEXT NOT NULL,
+              description TEXT NOT NULL,
+              is_company_position INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS industry_terms (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              term TEXT NOT NULL,
+              explanation TEXT NOT NULL,
+              relevance TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS red_flags (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              flag_type TEXT NOT NULL,
+              severity TEXT NOT NULL,
+              status TEXT NOT NULL,
+              evidence TEXT NOT NULL,
+              source_chunk_id TEXT NOT NULL,
+              source_page INTEGER NOT NULL,
+              why_it_matters TEXT NOT NULL,
+              suggested_verification TEXT NOT NULL,
+              resolved_by_document_id TEXT NOT NULL,
+              resolution_note TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS supplementary_resolutions (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              target_type TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              target_title TEXT NOT NULL,
+              resolution_status TEXT NOT NULL,
+              evidence_text TEXT NOT NULL,
+              impact_summary TEXT NOT NULL,
+              remaining_gap TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS financial_analyses (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              summary TEXT NOT NULL,
+              revenue_quality TEXT NOT NULL,
+              margin_costs TEXT NOT NULL,
+              cashflow_quality TEXT NOT NULL,
+              customer_concentration TEXT NOT NULL,
+              anomalies TEXT NOT NULL,
+              bp_conflicts TEXT NOT NULL,
+              follow_up_materials TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS funding_analyses (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              stated_round TEXT NOT NULL,
+              inferred_round TEXT NOT NULL,
+              round_confidence TEXT NOT NULL,
+              material_sufficiency TEXT NOT NULL,
+              risk_return_profile TEXT NOT NULL,
+              stability_assessment TEXT NOT NULL,
+              payback_cycle_view TEXT NOT NULL,
+              investor_signal TEXT NOT NULL,
+              existing_investors TEXT NOT NULL,
+              missing_round_evidence TEXT NOT NULL,
+              valuation_fit TEXT NOT NULL,
+              suggested_checks TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -249,6 +351,13 @@ def get_project_bundle(project_id: str) -> Dict[str, Any]:
             "tasks": fetch_all(conn, "SELECT * FROM verification_tasks WHERE project_id = ? ORDER BY created_at", (project_id,)),
             "evidence": fetch_all(conn, "SELECT * FROM evidence_links WHERE project_id = ? ORDER BY created_at", (project_id,)),
             "memos": fetch_all(conn, "SELECT * FROM investment_memos WHERE project_id = ? ORDER BY created_at", (project_id,)),
+            "sector_analyses": fetch_all(conn, "SELECT * FROM sector_analyses WHERE project_id = ? ORDER BY created_at", (project_id,)),
+            "industry_map_nodes": fetch_all(conn, "SELECT * FROM industry_map_nodes WHERE project_id = ? ORDER BY node_type, created_at", (project_id,)),
+            "industry_terms": fetch_all(conn, "SELECT * FROM industry_terms WHERE project_id = ? ORDER BY created_at", (project_id,)),
+            "red_flags": fetch_all(conn, "SELECT * FROM red_flags WHERE project_id = ? ORDER BY severity, created_at", (project_id,)),
+            "supplementary_resolutions": fetch_all(conn, "SELECT * FROM supplementary_resolutions WHERE project_id = ? ORDER BY created_at", (project_id,)),
+            "financial_analyses": fetch_all(conn, "SELECT * FROM financial_analyses WHERE project_id = ? ORDER BY created_at", (project_id,)),
+            "funding_analyses": fetch_all(conn, "SELECT * FROM funding_analyses WHERE project_id = ? ORDER BY created_at", (project_id,)),
         }
 
 
@@ -302,6 +411,12 @@ def replace_bp_analysis(
         conn.execute("DELETE FROM bp_claims WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM key_highlights WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM investment_assumptions WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM supplementary_resolutions WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM sector_analyses WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM industry_map_nodes WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM industry_terms WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM red_flags WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM funding_analyses WHERE project_id = ?", (project_id,))
 
         for document in documents:
             conn.execute(
@@ -422,6 +537,102 @@ def replace_bp_analysis(
                 ),
             )
 
+        sector = analysis.get("sector_analysis", {})
+        conn.execute(
+            "INSERT INTO sector_analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                new_id("sector"),
+                project_id,
+                sector.get("primary_industry", ""),
+                sector.get("sub_sector", ""),
+                sector.get("target_customer", ""),
+                sector.get("value_chain_position", ""),
+                sector.get("replacement_target", ""),
+                sector.get("profit_pool_logic", ""),
+                sector.get("summary", ""),
+                ts,
+                ts,
+            ),
+        )
+
+        for node in analysis.get("industry_map", []):
+            conn.execute(
+                "INSERT INTO industry_map_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("imap"),
+                    project_id,
+                    node.get("node_type", ""),
+                    node.get("label", ""),
+                    node.get("description", ""),
+                    1 if node.get("is_company_position") else 0,
+                    ts,
+                    ts,
+                ),
+            )
+
+        for term in analysis.get("industry_terms", []):
+            conn.execute(
+                "INSERT INTO industry_terms VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("term"),
+                    project_id,
+                    term.get("term", ""),
+                    term.get("explanation", ""),
+                    term.get("relevance", ""),
+                    ts,
+                    ts,
+                ),
+            )
+
+        for flag in analysis.get("red_flags", []):
+            _normalize_flag = {
+                "source_chunk_id": flag.get("source_chunk_id") or "",
+                "source_page": int(flag.get("source_page") or 1),
+            }
+            conn.execute(
+                "INSERT INTO red_flags VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("flag"),
+                    project_id,
+                    flag.get("title", ""),
+                    flag.get("flag_type", ""),
+                    flag.get("severity", "medium"),
+                    flag.get("status", "open"),
+                    flag.get("evidence", ""),
+                    _normalize_flag["source_chunk_id"],
+                    _normalize_flag["source_page"],
+                    flag.get("why_it_matters", ""),
+                    flag.get("suggested_verification", ""),
+                    "",
+                    "",
+                    ts,
+                    ts,
+                ),
+            )
+
+        funding = analysis.get("funding_analysis", {})
+        conn.execute(
+            "INSERT INTO funding_analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                new_id("funding"),
+                project_id,
+                funding.get("stated_round", ""),
+                funding.get("inferred_round", ""),
+                funding.get("round_confidence", "medium"),
+                funding.get("material_sufficiency", ""),
+                funding.get("risk_return_profile", ""),
+                funding.get("stability_assessment", ""),
+                funding.get("payback_cycle_view", ""),
+                funding.get("investor_signal", ""),
+                json.dumps(funding.get("existing_investors", []), ensure_ascii=False),
+                funding.get("missing_round_evidence", ""),
+                funding.get("valuation_fit", ""),
+                funding.get("suggested_checks", ""),
+                ts,
+                ts,
+            ),
+        )
+
         company = analysis["company_summary"]
         conn.execute(
             """
@@ -516,6 +727,84 @@ def insert_supplementary_verification(project_id: str, document: Dict[str, Any],
                     update["evidence_text"],
                     update["judgment"],
                     float(update["confidence"]),
+                    ts,
+                ),
+            )
+        for update in result.get("red_flag_updates", []):
+            flag = fetch_one(conn, "SELECT * FROM red_flags WHERE id = ? AND project_id = ?", (update.get("red_flag_id"), project_id))
+            if not flag:
+                continue
+            status = update.get("new_status") or flag["status"]
+            conn.execute(
+                """
+                UPDATE red_flags
+                SET status = ?, resolved_by_document_id = ?, resolution_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    document["id"] if status in {"partially_resolved", "resolved", "contradicted"} else flag["resolved_by_document_id"],
+                    update.get("resolution_note", ""),
+                    ts,
+                    flag["id"],
+                ),
+            )
+            conn.execute(
+                "INSERT INTO supplementary_resolutions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("resolution"),
+                    project_id,
+                    document["id"],
+                    "red_flag",
+                    flag["id"],
+                    flag["title"],
+                    status,
+                    update.get("evidence_text", ""),
+                    update.get("impact_summary", ""),
+                    update.get("remaining_gap", ""),
+                    ts,
+                ),
+            )
+        for resolution in result.get("material_resolutions", []):
+            target_id = resolution.get("target_id", "")
+            target_type = resolution.get("target_type", "material")
+            target_title = resolution.get("target_title", "")
+            if target_type == "task" and target_id:
+                task = fetch_one(conn, "SELECT title FROM verification_tasks WHERE id = ? AND project_id = ?", (target_id, project_id))
+                target_title = target_title or (task["title"] if task else "")
+            conn.execute(
+                "INSERT INTO supplementary_resolutions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("resolution"),
+                    project_id,
+                    document["id"],
+                    target_type,
+                    target_id,
+                    target_title,
+                    resolution.get("resolution_status", "new_information"),
+                    resolution.get("evidence_text", ""),
+                    resolution.get("impact_summary", ""),
+                    resolution.get("remaining_gap", ""),
+                    ts,
+                ),
+            )
+        financial = result.get("financial_analysis")
+        if isinstance(financial, dict) and any(str(value).strip() for value in financial.values()):
+            conn.execute(
+                "INSERT INTO financial_analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("fin"),
+                    project_id,
+                    document["id"],
+                    financial.get("summary", ""),
+                    financial.get("revenue_quality", ""),
+                    financial.get("margin_costs", ""),
+                    financial.get("cashflow_quality", ""),
+                    financial.get("customer_concentration", ""),
+                    financial.get("anomalies", ""),
+                    financial.get("bp_conflicts", ""),
+                    financial.get("follow_up_materials", ""),
+                    ts,
                     ts,
                 ),
             )

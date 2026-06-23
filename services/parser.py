@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Dict, List
 
@@ -59,6 +60,42 @@ def parse_text_file(path: Path) -> ParsedDocument:
     return ParsedDocument(text=text, chunks=make_chunks(text), parser="text")
 
 
+def parse_csv(path: Path) -> ParsedDocument:
+    rows = []
+    with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        reader = csv.reader(handle)
+        for index, row in enumerate(reader):
+            if index >= 80:
+                rows.append(["..."])
+                break
+            rows.append(row[:20])
+    text_rows = [" | ".join(cell.strip() for cell in row) for row in rows if any(cell.strip() for cell in row)]
+    text = "\n".join(text_rows)
+    return ParsedDocument(text=text, chunks=make_chunks(text), parser="csv")
+
+
+def parse_xlsx(path: Path) -> ParsedDocument:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise AppError("解析 XLSX 需要 openpyxl，请先安装 requirements.txt 中的依赖。") from exc
+
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    pages = []
+    for sheet_index, sheet in enumerate(workbook.worksheets[:8], start=1):
+        lines = [f"Sheet: {sheet.title}"]
+        for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            if row_index > 80:
+                lines.append("...")
+                break
+            values = ["" if value is None else str(value).strip() for value in row[:20]]
+            if any(values):
+                lines.append(" | ".join(values))
+        pages.append({"page": sheet_index, "text": "\n".join(lines)})
+    text = "\n\n".join(str(page["text"]) for page in pages)
+    return ParsedDocument(text=text, chunks=make_chunks(text, pages), parser="xlsx")
+
+
 def parse_pdf(path: Path) -> ParsedDocument:
     reader = PdfReader(str(path))
     pages = []
@@ -94,8 +131,12 @@ def parse_document(path: Path, pasted_text: str = "") -> ParsedDocument:
         return ParsedDocument(text=pasted_text, chunks=make_chunks(pasted_text), parser="pasted_text")
 
     suffix = path.suffix.lower()
-    if suffix in [".txt", ".md", ".csv", ".json"]:
+    if suffix in [".txt", ".md", ".json"]:
         return parse_text_file(path)
+    if suffix == ".csv":
+        return parse_csv(path)
+    if suffix == ".xlsx":
+        return parse_xlsx(path)
     if suffix == ".pdf":
         return parse_pdf(path)
     if suffix == ".docx":
@@ -106,4 +147,4 @@ def parse_document(path: Path, pasted_text: str = "") -> ParsedDocument:
         return parse_pptx(path)
     if suffix in [".png", ".jpg", ".jpeg", ".webp"]:
         raise AppError("图片 OCR 暂未接入，请粘贴 OCR 后的正文。")
-    raise AppError("暂不支持该文件格式，请上传 TXT/PDF/DOCX/PPTX 或粘贴文本。")
+    raise AppError("暂不支持该文件格式，请上传 TXT/CSV/XLSX/PDF/DOCX/PPTX 或粘贴文本。")

@@ -1,11 +1,21 @@
 from __future__ import annotations
+import json
 from typing import Dict, List
 
 import streamlit as st
 
 from services.llm import LLMClient
-from services.models import AppError, LLMConfigError, LLMResponseError, RISK_LABELS, STATUS_LABELS
-from services.pipeline import analyze_bp_batch, verify_supplementary
+from services.models import (
+    AppError,
+    INDUSTRY_NODE_LABELS,
+    LLMConfigError,
+    LLMResponseError,
+    RED_FLAG_STATUS_LABELS,
+    RED_FLAG_TYPE_LABELS,
+    RISK_LABELS,
+    STATUS_LABELS,
+)
+from services.pipeline import analyze_bp_batch, build_report_from_bundle, explain_industry_term, verify_supplementary
 from services.storage import (
     create_manual_task,
     create_project,
@@ -123,65 +133,7 @@ def show_project_header(bundle: Dict[str, object]) -> None:
 
 
 def memo_from_bundle(bundle: Dict[str, object]) -> str:
-    project = bundle["project"]
-    lines = [
-        f"# {project['company_name']} 阶段性投资分析 Memo",
-        "",
-        "## 项目基本信息",
-        "",
-        f"- 行业：{project['industry']}",
-        f"- 融资阶段：{project['financing_stage']}",
-        f"- 一句话介绍：{project['one_liner']}",
-        f"- 当前建议：{project['current_recommendation']}",
-        f"- 风险等级：{RISK_LABELS.get(project['risk_level'], project['risk_level'])}",
-        "",
-        "## 最重要看点",
-        "",
-    ]
-    if bundle["highlights"]:
-        lines.extend(
-            f"- **{item['title']}**：{item['why_important']}（证据充分度：{item['evidence_level']}，来源 p{item['source_page']}）"
-            for item in bundle["highlights"]
-        )
-    else:
-        lines.append("- 暂无。")
-
-    lines.extend(["", "## BP 关键陈述", ""])
-    if bundle["claims"]:
-        lines.extend(
-            f"- {claim['claim_text']}（状态：{STATUS_LABELS.get(claim['verification_status'], claim['verification_status'])}，来源 p{claim['source_page']}）"
-            for claim in bundle["claims"]
-        )
-    else:
-        lines.append("- 暂无。")
-
-    lines.extend(["", "## 关键假设", ""])
-    if bundle["assumptions"]:
-        lines.extend(
-            f"- {item['assumption_text']}｜风险：{RISK_LABELS.get(item['risk_level'], item['risk_level'])}｜验证方法：{item['verification_method']}"
-            for item in bundle["assumptions"]
-        )
-    else:
-        lines.append("- 暂无。")
-
-    lines.extend(["", "## 验证任务", ""])
-    if bundle["tasks"]:
-        lines.extend(
-            f"- {task['title']}｜风险：{RISK_LABELS.get(task['risk_level'], task['risk_level'])}｜状态：{STATUS_LABELS.get(task['status'], task['status'])}｜缺失证据：{task['missing_evidence']}"
-            for task in bundle["tasks"]
-        )
-    else:
-        lines.append("- 暂无。")
-
-    lines.extend(
-        [
-            "",
-            "## 阶段性建议",
-            "",
-            f"{project['current_recommendation']}。该建议仅基于当前材料的证据充分度，不构成最终投资决策。",
-        ]
-    )
-    return "\n".join(lines)
+    return build_report_from_bundle(bundle)
 
 
 def upload_bp_tab(project_id: str, bundle: Dict[str, object]) -> None:
@@ -207,6 +159,32 @@ def upload_bp_tab(project_id: str, bundle: Dict[str, object]) -> None:
         st.metric("关键假设", len(bundle["assumptions"]))
     with metric_cols[3]:
         st.metric("验证任务", len(bundle["tasks"]))
+
+    open_flags = [flag for flag in bundle.get("red_flags", []) if flag["status"] != "resolved"]
+    if open_flags:
+        st.markdown("#### 直接异常 / 红旗")
+        for flag in open_flags[:3]:
+            with st.container(border=True):
+                st.markdown(f"**{flag['title']}**")
+                st.caption(
+                    f"类型：{RED_FLAG_TYPE_LABELS.get(flag['flag_type'], flag['flag_type'])}｜严重度：{RISK_LABELS.get(flag['severity'], flag['severity'])}｜状态：{RED_FLAG_STATUS_LABELS.get(flag['status'], flag['status'])}"
+                )
+                st.write(flag["why_it_matters"])
+
+    funding_items = bundle.get("funding_analyses", [])
+    if funding_items:
+        funding = funding_items[-1]
+        st.markdown("#### 融资轮次判断")
+        with st.container(border=True):
+            cols = st.columns(4)
+            with cols[0]:
+                field_card("BP 声称轮次", funding["stated_round"] or project["financing_stage"])
+            with cols[1]:
+                field_card("反推轮次", funding["inferred_round"])
+            with cols[2]:
+                field_card("资料充分度", funding["material_sufficiency"])
+            with cols[3]:
+                field_card("投资人信号", funding["investor_signal"])
 
     high_risk_tasks = [
         task for task in bundle["tasks"] if task["risk_level"] == "high" and task["status"] != "verified"
@@ -247,7 +225,7 @@ def upload_bp_tab(project_id: str, bundle: Dict[str, object]) -> None:
     with st.form("upload_bp"):
         uploaded_files = st.file_uploader(
             "BP 文件",
-            type=["txt", "md", "pdf", "docx", "pptx"],
+            type=["txt", "md", "csv", "xlsx", "pdf", "docx", "pptx"],
             accept_multiple_files=True,
         )
         pasted = st.text_area("或粘贴 BP 正文 / 追加说明", height=180)
@@ -332,6 +310,152 @@ def bp_analysis_tab(bundle: Dict[str, object]) -> None:
         use_container_width=True,
         hide_index=True,
     )
+
+
+def sector_tab(project_id: str, bundle: Dict[str, object]) -> None:
+    st.subheader("行业与产业图")
+    sector = bundle.get("sector_analyses", [])
+    if sector:
+        item = sector[-1]
+        cols = st.columns(3)
+        with cols[0]:
+            field_card("一级行业", item["primary_industry"])
+        with cols[1]:
+            field_card("细分赛道", item["sub_sector"])
+        with cols[2]:
+            field_card("价值链位置", item["value_chain_position"])
+        st.write(item["summary"])
+        detail_cols = st.columns(3)
+        with detail_cols[0]:
+            field_card("目标客户", item["target_customer"])
+        with detail_cols[1]:
+            field_card("替代对象", item["replacement_target"])
+        with detail_cols[2]:
+            field_card("利润池判断", item["profit_pool_logic"])
+    else:
+        st.info("完成 BP 分析后显示赛道归类和产业链位置。")
+
+    st.markdown("#### 产业图")
+    if bundle.get("industry_map_nodes"):
+        st.dataframe(
+            [
+                {
+                    "环节": INDUSTRY_NODE_LABELS.get(node["node_type"], node["node_type"]),
+                    "节点": node["label"],
+                    "说明": node["description"],
+                    "公司位置": "是" if node["is_company_position"] else "",
+                }
+                for node in bundle["industry_map_nodes"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("暂无产业图节点。")
+
+    st.markdown("#### 行业关键词")
+    if bundle.get("industry_terms"):
+        for term in bundle["industry_terms"]:
+            with st.container(border=True):
+                st.markdown(f"**{term['term']}**")
+                st.write(term["explanation"])
+                st.caption(f"与本项目关系：{term['relevance']}")
+    else:
+        st.info("暂无关键词解释。")
+
+    with st.form("term_explain"):
+        query = st.text_input("AI 术语查询", placeholder="输入一个行业名词，例如：DRG、回款周期、垂直 SaaS")
+        if st.form_submit_button("解释术语"):
+            if not query.strip():
+                st.warning("请输入要解释的术语。")
+            else:
+                try:
+                    with st.spinner("正在解释术语..."):
+                        result = explain_industry_term(project_id, query.strip(), LLMClient())
+                    st.markdown(f"**{result['term']}**")
+                    st.write(result["plain_explanation"])
+                    st.caption(f"为什么重要：{result['why_it_matters']}")
+                    st.caption(f"继续追问：{result['related_questions']}")
+                except (LLMConfigError, LLMResponseError, AppError, Exception) as exc:
+                    st.error(str(exc))
+
+
+def red_flags_tab(bundle: Dict[str, object]) -> None:
+    st.subheader("风险与异常")
+    st.caption("这里仅展示一开始就不符合逻辑或真实性风险明显的问题；普通信息缺失仍在验证任务里跟进。")
+    if bundle.get("red_flags"):
+        for flag in bundle["red_flags"]:
+            with st.container(border=True):
+                cols = st.columns([3, 1, 1])
+                with cols[0]:
+                    st.markdown(f"**{flag['title']}**")
+                    st.caption(f"类型：{RED_FLAG_TYPE_LABELS.get(flag['flag_type'], flag['flag_type'])}｜来源 p{flag['source_page']}")
+                with cols[1]:
+                    st.write(f"严重度：{RISK_LABELS.get(flag['severity'], flag['severity'])}")
+                with cols[2]:
+                    st.write(f"状态：{RED_FLAG_STATUS_LABELS.get(flag['status'], flag['status'])}")
+                st.write(f"依据：{flag['evidence']}")
+                st.write(f"为什么重要：{flag['why_it_matters']}")
+                st.caption(f"建议核验：{flag['suggested_verification']}")
+                if flag["resolution_note"]:
+                    st.info(f"解决说明：{flag['resolution_note']}")
+    else:
+        st.info("未发现需要直接列出的明显逻辑或真实性异常。")
+
+
+def funding_tab(bundle: Dict[str, object]) -> None:
+    st.subheader("轮次与投资人")
+    funding_items = bundle.get("funding_analyses", [])
+    if not funding_items:
+        st.info("完成 BP 分析后显示融资轮次、资料充分度、风险收益和投资人信号。")
+        return
+
+    funding = funding_items[-1]
+    top = st.columns(3)
+    with top[0]:
+        field_card("BP 声称轮次", funding["stated_round"])
+    with top[1]:
+        field_card("材料反推轮次", funding["inferred_round"])
+    with top[2]:
+        field_card("判断置信度", RISK_LABELS.get(funding["round_confidence"], funding["round_confidence"]))
+
+    st.markdown("#### 轮次质量判断")
+    cols = st.columns(2)
+    with cols[0]:
+        st.write(f"资料充分度：{funding['material_sufficiency']}")
+        st.write(f"风险收益特征：{funding['risk_return_profile']}")
+        st.write(f"估值/阶段匹配：{funding['valuation_fit']}")
+    with cols[1]:
+        st.write(f"稳定性判断：{funding['stability_assessment']}")
+        st.write(f"回款周期判断：{funding['payback_cycle_view']}")
+        st.write(f"仍需核验：{funding['missing_round_evidence']}")
+
+    st.markdown("#### 投资人信号")
+    st.write(funding["investor_signal"])
+    try:
+        investors = json.loads(funding["existing_investors"] or "[]")
+    except json.JSONDecodeError:
+        investors = []
+    if investors:
+        st.dataframe(
+            [
+                {
+                    "投资人": item.get("name", ""),
+                    "类型": item.get("investor_type", ""),
+                    "轮次": item.get("round", ""),
+                    "信号强度": item.get("signal_strength", ""),
+                    "意义": item.get("why_it_matters", ""),
+                    "需核验": item.get("needs_verification", ""),
+                }
+                for item in investors
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("BP 未披露历史投资人、领投方或跟投方。")
+
+    st.caption(f"建议核验：{funding['suggested_checks']}")
 
 
 def risk_sort_value(task: Dict[str, object]) -> int:
@@ -459,7 +583,7 @@ def tasks_tab(bundle: Dict[str, object]) -> None:
 def supplementary_tab(project_id: str, bundle: Dict[str, object]) -> None:
     st.subheader("补充材料上传与验证")
     with st.form("upload_supp"):
-        uploaded = st.file_uploader("补充材料", type=["txt", "md", "pdf", "docx", "pptx"], key="supp_file")
+        uploaded = st.file_uploader("补充材料", type=["txt", "md", "csv", "xlsx", "pdf", "docx", "pptx"], key="supp_file")
         pasted = st.text_area("或粘贴补充材料正文", height=160)
         submitted = st.form_submit_button("上传并调用 AI 验证", type="primary")
         if submitted:
@@ -495,21 +619,58 @@ def supplementary_tab(project_id: str, bundle: Dict[str, object]) -> None:
     else:
         st.info("上传补充材料并完成验证后显示证据链接。")
 
+    st.markdown("#### 补充材料解决问题汇总")
+    if bundle.get("supplementary_resolutions"):
+        st.dataframe(
+            [
+                {
+                    "对象": item["target_title"] or item["target_type"],
+                    "状态": item["resolution_status"],
+                    "证据": item["evidence_text"],
+                    "影响": item["impact_summary"],
+                    "仍缺": item["remaining_gap"],
+                }
+                for item in bundle["supplementary_resolutions"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("暂无补充材料解决问题汇总。")
+
+
+def financial_tab(bundle: Dict[str, object]) -> None:
+    st.subheader("财务分析")
+    if not bundle.get("financial_analyses"):
+        st.info("上传财务信息、收入明细、回款记录、成本费用或现金流材料后显示财务分析。")
+        return
+
+    for item in bundle["financial_analyses"]:
+        with st.container(border=True):
+            st.markdown(f"**{item['summary']}**")
+            st.write(f"收入质量：{item['revenue_quality']}")
+            st.write(f"毛利 / 成本费用：{item['margin_costs']}")
+            st.write(f"现金流 / 回款：{item['cashflow_quality']}")
+            st.write(f"客户集中：{item['customer_concentration']}")
+            st.write(f"异常波动：{item['anomalies']}")
+            st.write(f"与 BP 冲突：{item['bp_conflicts']}")
+            st.caption(f"建议补充材料：{item['follow_up_materials']}")
+
 
 def memo_tab(project_id: str, bundle: Dict[str, object]) -> None:
-    st.subheader("投资 memo")
+    st.subheader("综合分析报告")
     if bundle["claims"] or bundle["highlights"] or bundle["assumptions"] or bundle["tasks"]:
         content = memo_from_bundle(bundle)
-        st.download_button("下载 Markdown", content, file_name="investment_memo.md", mime="text/markdown")
-        st.markdown("#### Memo 预览")
+        st.download_button("下载 Markdown", content, file_name="investment_research_report.md", mime="text/markdown")
+        st.markdown("#### 报告预览")
         st.markdown(content)
     elif bundle["memos"]:
         latest = bundle["memos"][-1]
-        st.download_button("下载 Markdown", latest["content_markdown"], file_name="investment_memo.md", mime="text/markdown")
-        st.markdown("#### Memo 预览")
+        st.download_button("下载 Markdown", latest["content_markdown"], file_name="investment_research_report.md", mime="text/markdown")
+        st.markdown("#### 报告预览")
         st.markdown(latest["content_markdown"])
     else:
-        st.info("完成 BP 分析后，这里会自动展示 memo。")
+        st.info("完成 BP 分析后，这里会自动展示综合分析报告。")
 
 
 def main() -> None:
@@ -524,15 +685,25 @@ def main() -> None:
 
     bundle = get_project_bundle(project_id)
     show_project_header(bundle)
-    overview, analysis, tasks, supplementary, memo = st.tabs(["概览 / BP 上传", "BP 分析", "验证任务", "补充材料", "投资 memo"])
+    overview, analysis, sector, funding, risks, tasks, supplementary, financial, memo = st.tabs(
+        ["概览 / BP 上传", "BP 分析", "行业与产业图", "轮次与投资人", "风险与异常", "验证任务", "补充材料", "财务分析", "综合报告"]
+    )
     with overview:
         upload_bp_tab(project_id, bundle)
     with analysis:
         bp_analysis_tab(bundle)
+    with sector:
+        sector_tab(project_id, bundle)
+    with funding:
+        funding_tab(bundle)
+    with risks:
+        red_flags_tab(bundle)
     with tasks:
         tasks_tab(bundle)
     with supplementary:
         supplementary_tab(project_id, bundle)
+    with financial:
+        financial_tab(bundle)
     with memo:
         memo_tab(project_id, bundle)
 
